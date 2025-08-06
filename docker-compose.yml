@@ -1,6 +1,18 @@
+# This file is used by Docker Compose to run the services needed for our project.
+# In this case, it's just the Redis database.
+
 services:
+  # Define a service named 'redis'. This is the database for our blackboard.
   redis:
+    # Use the official Redis image, version 7, from Docker Hub.
     image: "redis:7"
+    # Map port 6379 on our local machine to port 6379 inside the Docker container.
+    # This allows our FastAPI application (running on our machine) to connect to Redis
+    # (running in the container).
     ports:
       - "6379:6379"
+    # This command is run when the container starts.
+    # It tells Redis to enable "Append Only File" (AOF) persistence. This means
+    # all data will be saved to disk, so our message log won't be lost if we
+    # restart the Docker container.
     command: ["redis-server", "--appendonly", "yes"]
