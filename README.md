@@ -10,23 +10,30 @@ The system is designed to be simple, robust, and scalable.
 
 ```mermaid
 graph TD;
-    subgraph "Clients / AI Agents"
-        Agent1["Agent 1 (Python)"]
-        Agent2["Agent 2 (Node.js)"]
-        AgentN["Agent N (...)"]
+    subgraph "Clients / HTTP Agents"
+        Agent1["Agent 1 (HTTP)"]
+        Agent2["Agent 2 (HTTP)"]
+    end
+
+    subgraph "MCP Host"
+        Host["MCP Host (Claude / IDE)"]
     end
 
     subgraph "Blackboard System"
         API["Blackboard API (FastAPI)"]
+        MCP["Blackboard MCP Server (stdio)"]
         DB[(Redis Streams<br/>Message Log)]
     end
 
     Agent1 -- "POST /message (JSON)" --> API;
     Agent2 -- "POST /message (JSON)" --> API;
-    AgentN -- "POST /message (JSON)" --> API;
-
     API -- "XADD (append to stream)" --> DB;
-    API -- "XRANGE (read from stream)" --> ReaderAgent["Reader Agent / Analytics Tool"];
+    API -- "XRANGE (read from stream)" --> ReaderAgent["Reader / Analytics"];
+
+    Host -- "stdio (MCP tools)" --> MCP;
+    Host -- "get_messages" --> MCP;
+    MCP -- "post_message → XADD" --> DB;
+    MCP -- "XRANGE" --> DB;
 ```
 
 1.  **AI Agents**: Any process that can send an HTTP request. They send structured JSON messages to the central API.
@@ -69,6 +76,7 @@ pip install -r requirements.txt
 ### 2. Run the System
 
 You will need **two separate terminals** for this, both with the virtual environment activated.
+
 
 **In Terminal 1: Start the Database and API Server**
 
@@ -127,6 +135,95 @@ The current message schema includes:
 *   `payload`: A flexible `dict` for any other relevant data (the text itself, tool parameters, token counts, confidence scores, etc.).
 
 This allows us to move beyond simple chat logs and start treating the blackboard as a rich, queryable database of agent behavior.
+
+## Optional: Run as an MCP Server (stdio)
+
+This project includes a minimal MCP server that exposes the blackboard as MCP tools. MCP is a JSON‑RPC based protocol for connecting AI hosts to external tools and data over stdio or websockets.
+
+MCP concepts used here:
+- **Tools**: callable operations the host can invoke.
+  - `post_message(agent_id, conversation_id, message_type, payload)`
+  - `get_messages(limit=None)`
+- **Transport**: stdio (the host launches a subprocess and talks over stdin/stdout)
+
+### Install dependencies
+
+```powershell
+pip install -r requirements.txt
+```
+
+### Start the MCP server
+
+```powershell
+python -m blackboard.mcp_server
+```
+
+This starts a stdio MCP server process. Typically you do not run it manually; an MCP host spawns it and speaks JSON‑RPC 2.0 over stdio. For local testing you can connect via an MCP inspector or an MCP-enabled host.
+
+### How it maps to your existing system
+
+- The MCP server reuses the same Redis stream (`REDIS_STREAM_KEY`) and connection (`REDIS_URL`).
+- You can run the FastAPI API and the MCP server simultaneously; both interact with the same Redis.
+
+### Environment variables
+
+```text
+REDIS_URL=redis://localhost:6379
+REDIS_STREAM_KEY=blackboard_messages
+```
+
+### Security note
+
+The stdio server is intended to be spawned by a trusted host. If you later expose an MCP transport over the network, add authentication and authorization.
+
+---
+
+## What’s happening end-to-end
+
+- HTTP path:
+  - `agent.py` calls `POST /message` on `blackboard.main` (FastAPI).
+  - The API validates the JSON and appends it to a Redis Stream with `XADD`.
+  - `reader.py` calls `GET /messages`, which performs `XRANGE` to read all entries.
+  - A "conversation" is just entries sharing the same `conversation_id`.
+
+- MCP path:
+  - `blackboard/mcp_server.py` runs a stdio MCP server (no ports), exposing tools:
+    - `post_message(agent_id, conversation_id, message_type, payload)` → `XADD`
+    - `get_messages(limit=None)` → `XRANGE`
+  - An MCP host (e.g., Claude Desktop/Code) spawns this process and invokes tools.
+  - Both paths read/write the same Redis Stream, so they interoperate.
+
+## Use with Claude Desktop (MCP client)
+
+Add to `%AppData%\Claude\claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "blackboard": {
+      "command": "C:\\Users\\himni\\OneDrive\\Documents\\BlackboardMCP\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "blackboard.mcp_server"],
+      "cwd": "C:\\Users\\himni\\OneDrive\\Documents\\BlackboardMCP",
+      "env": {
+        "REDIS_URL": "redis://localhost:6379",
+        "REDIS_STREAM_KEY": "blackboard_messages",
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  }
+}
+```
+
+Restart Claude. In Tools, you should see:
+- `post_message(agent_id, conversation_id, message_type, payload)`
+- `get_messages(limit)`
+
+## Debugging tips
+
+- Always set absolute `command` and `cwd` in client configs; avoid relative paths.
+- Use your venv’s `python.exe` so the MCP SDK and deps are available.
+- For Claude Desktop logs and common issues (working directory, env vars), see:
+  - Debugging MCP servers: https://modelcontextprotocol.io/legacy/tools/debugging
 
 ## Next Steps & Vision
 
